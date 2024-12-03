@@ -1,0 +1,1592 @@
+AWS Access: https://ifs.atheneusa.com/adfs/ls/IdpInitiatedSignOn.aspx?loginToRp=urn:amazon:webservices
+
+
+Size of The database
+==========================
+
+SELECT pg_database.datname,pg_size_pretty(pg_database_size(pg_database.datname)) AS size FROM pg_database where datname='edb';
+
+
+locks for table
+==================
+select database,relation,page,virtualtransaction,pid,mode,granted from pg_locks where mode='ExclusiveLock' relation in 
+(select oid from pg_class where relname='organization');
+
+
+Aged SQLs and sessions
+==============================
+SELECT
+now() - pg_stat_activity.xact_start AS age, pg_stat_activity.datname,
+ pg_stat_activity.usename, pg_stat_activity.waiting,
+pg_stat_activity.query_start, pg_stat_activity.client_addr,
+pg_stat_activity.client_port, pg_stat_activity.query
+FROM pg_stat_activity
+WHERE pg_stat_activity.xact_start IS NOT NULL
+ORDER BY pg_stat_activity.xact_start;
+
+Kill a Session
+ =================================
+ 
+select pg_terminate_backend(pid) from pg_stat_activity where datname='edb' and usename <> ' enterprisedb'
+ 
+ =================================
+	 
+ Vacuum with the option Analyze is used to update statistics in Postgresql
+VACUUM ANALYZE ; is the syntax.
+
+
+
+tablespace Location info
+===============================
+
+SELECT 
+  spcname AS "Name",
+  pg_catalog.pg_get_userbyid(spcowner) AS "Owner",
+  pg_catalog.pg_tablespace_location(oid) AS "Location"
+FROM pg_catalog.pg_tablespace
+ORDER BY 1;
+
+================ Tablespace size ======================
+
+SELECT pg_size_pretty(pg_tablespace_size('orafinarch_data_tbs01'));
+
+
+=========== DB Wise Connected User details ===========================
+
+
+select * from pg_stat_activity where datname='bitbucketprod' and usesysid<>10
+
+Schema size;
+=======================
+
+SELECT schema_name, 
+       pg_size_pretty(sum(table_size))
+FROM (
+  SELECT pg_catalog.pg_namespace.nspname as schema_name,
+         pg_relation_size(pg_catalog.pg_class.oid) as table_size,
+         sum(pg_relation_size(pg_catalog.pg_class.oid)) over () as database_size
+  FROM   pg_catalog.pg_class
+     JOIN pg_catalog.pg_namespace ON relnamespace = pg_catalog.pg_namespace.oid
+) t
+GROUP BY schema_name, database_size
+
+
+--- Tablespace wise object details=----------
+
+SELECT tablespace_name,schema_name, count(1)
+FROM (
+  SELECT pg_catalog.pg_tablespace.spcname as tablespace_name, pg_catalog.pg_namespace.nspname as schema_name,
+		 pg_catalog.pg_class.relname as relation_name
+  FROM   pg_catalog.pg_class
+     JOIN pg_catalog.pg_namespace ON pg_catalog.pg_class.relnamespace = pg_catalog.pg_namespace.oid
+	 join pg_catalog.pg_tablespace on pg_catalog.pg_tablespace.oid=pg_catalog.pg_class.reltablespace
+	 group by pg_catalog.pg_tablespace.spcname ,pg_catalog.pg_namespace.nspname , pg_catalog.pg_class.relname,
+	 pg_size_pretty(pg_relation_size(pg_catalog.pg_class.oid))
+) t
+where tablespace_name='fasat_data_tbs01'
+GROUP BY schema_name, tablespace_name
+
+
+
+vacuum status
+===========================
+
+select relname, last_autoanalyze, last_autovacuum, last_vacuum, n_dead_tup
+ from pg_stat_all_tables where n_dead_tup >0;
+
+
+CURRENT SQLs
+===================================
+
+SELECT pg_stat_get_backend_pid(s.backendid) AS procpid,
+       pg_stat_get_backend_activity(s.backendid) AS current_query
+    FROM (SELECT pg_stat_get_backend_idset() AS backendid) AS s;
+	
+==============Space Usage==================
+
+
+SELECT
+  current_database(), schemaname, tablename, /*reltuples::bigint, relpages::bigint, otta,*/
+  ROUND((CASE WHEN otta=0 THEN 0.0 ELSE sml.relpages::FLOAT/otta END)::NUMERIC,1) AS tbloat,
+  CASE WHEN relpages < otta THEN 0 ELSE bs*(sml.relpages-otta)::BIGINT END AS wastedbytes,
+  iname, /*ituples::bigint, ipages::bigint, iotta,*/
+  ROUND((CASE WHEN iotta=0 OR ipages=0 THEN 0.0 ELSE ipages::FLOAT/iotta END)::NUMERIC,1) AS ibloat,
+  CASE WHEN ipages < iotta THEN 0 ELSE bs*(ipages-iotta) END AS wastedibytes
+FROM (
+  SELECT
+    schemaname, tablename, cc.reltuples, cc.relpages, bs,
+    CEIL((cc.reltuples*((datahdr+ma-
+      (CASE WHEN datahdr%ma=0 THEN ma ELSE datahdr%ma END))+nullhdr2+4))/(bs-20::FLOAT)) AS otta,
+    COALESCE(c2.relname,'?') AS iname, COALESCE(c2.reltuples,0) AS ituples, COALESCE(c2.relpages,0) AS ipages,
+    COALESCE(CEIL((c2.reltuples*(datahdr-12))/(bs-20::FLOAT)),0) AS iotta -- very rough approximation, assumes all cols
+  FROM (
+    SELECT
+      ma,bs,schemaname,tablename,
+      (datawidth+(hdr+ma-(CASE WHEN hdr%ma=0 THEN ma ELSE hdr%ma END)))::NUMERIC AS datahdr,
+      (maxfracsum*(nullhdr+ma-(CASE WHEN nullhdr%ma=0 THEN ma ELSE nullhdr%ma END))) AS nullhdr2
+    FROM (
+      SELECT
+        schemaname, tablename, hdr, ma, bs,
+        SUM((1-null_frac)*avg_width) AS datawidth,
+        MAX(null_frac) AS maxfracsum,
+        hdr+(
+          SELECT 1+COUNT(*)/8
+          FROM pg_stats s2
+          WHERE null_frac<>0 AND s2.schemaname = s.schemaname AND s2.tablename = s.tablename
+        ) AS nullhdr
+      FROM pg_stats s, (
+        SELECT
+          (SELECT current_setting('block_size')::NUMERIC) AS bs,
+          CASE WHEN SUBSTRING(v,12,3) IN ('8.0','8.1','8.2') THEN 27 ELSE 23 END AS hdr,
+          CASE WHEN v ~ 'mingw32' THEN 8 ELSE 4 END AS ma
+        FROM (SELECT version() AS v) AS foo
+      ) AS constants
+      GROUP BY 1,2,3,4,5
+    ) AS foo
+  ) AS rs
+  JOIN pg_class cc ON cc.relname = rs.tablename
+  JOIN pg_namespace nn ON cc.relnamespace = nn.oid AND nn.nspname = rs.schemaname AND nn.nspname <> 'information_schema'
+  LEFT JOIN pg_index i ON indrelid = cc.oid
+  LEFT JOIN pg_class c2 ON c2.oid = i.indexrelid
+) AS sml where sml.tablename='activemq_msgs'
+ORDER BY wastedbytes DESC
+
+
+SELECT table_schema, TABLE_NAME,pg_size_pretty(total_bytes) AS total
+    , pg_size_pretty(index_bytes) AS INDEX
+    , pg_size_pretty(toast_bytes) AS toast
+    , pg_size_pretty(table_bytes) AS TABLE
+  FROM (
+  SELECT *, total_bytes-index_bytes-COALESCE(toast_bytes,0) AS table_bytes FROM (
+      SELECT c.oid,nspname AS table_schema, relname AS TABLE_NAME
+              , c.reltuples AS row_estimate
+              , pg_total_relation_size(c.oid) AS total_bytes
+              , pg_indexes_size(c.oid) AS index_bytes
+              , pg_total_relation_size(reltoastrelid) AS toast_bytes
+          FROM pg_class c
+          LEFT JOIN pg_namespace n ON n.oid = c.relnamespace
+          WHERE relkind = 'r'
+  ) a
+) a where table_schema='opas' order by 3
+
+
+
+SELECT pg_size_pretty(sum(total_bytes)) AS total
+  FROM (
+  SELECT *, total_bytes-index_bytes-COALESCE(toast_bytes,0) AS table_bytes FROM (
+      SELECT c.oid,nspname AS table_schema, relname AS TABLE_NAME
+              , c.reltuples AS row_estimate
+              , pg_total_relation_size(c.oid) AS total_bytes
+              , pg_indexes_size(c.oid) AS index_bytes
+              , pg_total_relation_size(reltoastrelid) AS toast_bytes
+          FROM pg_class c
+          LEFT JOIN pg_namespace n ON n.oid = c.relnamespace
+          WHERE relkind = 'r'
+  ) a
+) a group by order by 1
+
+
+
+=================Curent SQL running========================
+
+
+select pid, now() - query_start AS elapsed, 
+query AS sql_text, 
+datname AS database, 
+usename AS username
+from    pg_stat_activity
+where now() - query_start > '00:01:00'   /* we only want queries lasting more than one minute */
+and state = 'active'
+order by 1 desc
+
+======================Size======================
+
+SELECT pg_size_pretty(pg_tablespace_size('adsprod')) As fulldbsize;
+
+============Search Path===============
+
+SET search_path = schema1,schema2,public;
+
+
+Session Blocking
+==================================
+SELECT blocked_locks.pid     AS blocked_pid,
+         blocked_activity.usename  AS blocked_user,
+         blocked_activity.query    AS blocked_statement,
+         blocking_locks.pid     AS blocking_pid,
+         blocking_activity.usename AS blocking_user,
+         blocking_activity.query   AS current_statement_in_blocking_process,
+         blocking_activity.application_name AS blocking_application,
+         blocked_activity.application_name AS blocked_application,
+         blocked_activity.state AS session_status
+   FROM  pg_catalog.pg_locks         blocked_locks
+    JOIN pg_catalog.pg_stat_activity blocked_activity  ON blocked_activity.pid = blocked_locks.pid
+    JOIN pg_catalog.pg_locks         blocking_locks 
+        ON blocking_locks.locktype = blocked_locks.locktype
+        AND blocking_locks.DATABASE IS NOT DISTINCT FROM blocked_locks.DATABASE
+        AND blocking_locks.relation IS NOT DISTINCT FROM blocked_locks.relation
+        AND blocking_locks.page IS NOT DISTINCT FROM blocked_locks.page
+        AND blocking_locks.tuple IS NOT DISTINCT FROM blocked_locks.tuple
+        AND blocking_locks.virtualxid IS NOT DISTINCT FROM blocked_locks.virtualxid
+        AND blocking_locks.transactionid IS NOT DISTINCT FROM blocked_locks.transactionid
+        AND blocking_locks.classid IS NOT DISTINCT FROM blocked_locks.classid
+        AND blocking_locks.objid IS NOT DISTINCT FROM blocked_locks.objid
+        AND blocking_locks.objsubid IS NOT DISTINCT FROM blocked_locks.objsubid
+        AND blocking_locks.pid != blocked_locks.pid
+    JOIN pg_catalog.pg_stat_activity blocking_activity ON blocking_activity.pid = blocking_locks.pid
+   WHERE NOT blocked_locks.GRANTED order by 1,4;   
+   
+   
+
+Session Block status - Object wise
+========================================
+
+SELECT 
+	pl.pid AS ProcessID
+	,psa.datname AS DatabaseName
+	,psa.usename AS UserName
+	,psa.application_name AS ApplicationName
+	,ps.relname AS ObjectName
+	,psa.query_start AS QueryStartTime
+	,psa.state AS QueryState
+	,psa.query AS SQLQuery
+	,pl.locktype
+	,pl.tuple AS TupleNumber
+	,pl.mode AS LockMode
+	,pl.granted -- True if lock is held, false if lock is awaited
+FROM pg_locks AS pl 
+LEFT JOIN pg_stat_activity AS psa
+	ON pl.pid = psa.pid
+LEFT JOIN pg_class AS ps
+	ON pl.relation = ps.oid
+	
+	
+Object Live and Dead Tuples
+
+==================================
+
+SELECT 
+	relname AS ObjectName
+	,pg_stat_get_live_tuples(c.oid) AS LiveTuples
+	,pg_stat_get_dead_tuples(c.oid) AS DeadTuples
+FROM pg_class c;
+
+SELECT 
+	relname AS TableName
+	,n_live_tup AS LiveTuples
+	,n_dead_tup AS DeadTuples
+FROM pg_stat_user_tables;
+
+===========Procedure with specified Text========================
+
+select 
+	proname AS FunctionName	
+from pg_proc where prosrc like '%Your_Text%';
+
+or
+
+select 
+	routine_catalog AS DatabaseName
+	,routine_schema AS SchemaName
+	,routine_name AS FunctionName
+	,routine_type AS ObjectType
+from information_schema.routines 
+where routine_definition like '%Your_Text%';
+
+
+
+================Tablesapce Lcoation details===================
+
+select spcname, case spcname when 'pg_default' then (select setting from pg_settings where name = 'data_directory')||'/base' when 'pg_global' then (select setting from pg_settings where name = 'data_directory')||'/global' else spcname end from pg_tablespace;
+
+
+
+====================Object Wise space usage====================
+
+SELECT *, pg_size_pretty(total_bytes) AS total
+    , pg_size_pretty(index_bytes) AS INDEX
+    , pg_size_pretty(toast_bytes) AS toast
+    , pg_size_pretty(table_bytes) AS TABLE
+  FROM (
+  SELECT *, total_bytes-index_bytes-COALESCE(toast_bytes,0) AS table_bytes FROM (
+      SELECT c.oid,nspname AS table_schema, relname AS TABLE_NAME
+              , c.reltuples AS row_estimate
+              , pg_total_relation_size(c.oid) AS total_bytes
+              , pg_indexes_size(c.oid) AS index_bytes
+              , pg_total_relation_size(reltoastrelid) AS toast_bytes
+          FROM pg_class c
+          LEFT JOIN pg_namespace n ON n.oid = c.relnamespace
+          WHERE relkind = 'r'
+  ) a
+) a order by 8 ;
+
+======= Database Size=====================
+SELECT d.datname AS Name,  pg_catalog.pg_get_userbyid(d.datdba) AS Owner,
+    CASE WHEN pg_catalog.has_database_privilege(d.datname, 'CONNECT')
+        THEN pg_catalog.pg_size_pretty(pg_catalog.pg_database_size(d.datname))
+        ELSE 'No Access'
+    END AS SIZE
+FROM pg_catalog.pg_database d
+    ORDER BY
+    CASE WHEN pg_catalog.has_database_privilege(d.datname, 'CONNECT')
+        THEN pg_catalog.pg_database_size(d.datname)
+        ELSE NULL
+    END DESC ;
+
+
+
+============= User and Roles ================
+
+select pu.usename,pr.rolname from pg_user pu, pg_roles pr, pg_auth_members pm 
+where pu.usesysid=pm.member and
+pm.roleid=pr.oid and pu.usename='cnt2982';
+
+
+============Stop straming replication during backups=======================
+
+SELECT pg_xlog_replay_pause();
+
+-- pg_dumps run here
+
+SELECT pg_xlog_replay_resume();
+
+
+==============Start database in single user mode===============
+
+
+/usr/bin/postgres --single -D /var/lib/pgsql93/data -P -d 1
+
+================Make database read only ===========================
+alter database readonly set default_transaction_read_only = on;
+
+
+---------------- Object List -------------------------
+
+
+SELECT  rel.oid, pn.nspname,rel.relname AS name,
+    (SELECT count(*) FROM pg_trigger WHERE tgrelid=rel.oid AND tgisinternal = FALSE) AS triggercount,
+    (SELECT count(*) FROM pg_trigger WHERE tgrelid=rel.oid AND tgisinternal = FALSE AND tgenabled = 'O') AS has_enable_triggers
+FROM pg_class rel, pg_namespace pn
+    WHERE rel.relkind IN ('r','s','t') AND rel.relnamespace = pn.oid
+    and   pn.nspname='public'
+        ORDER BY rel.relname;
+		
+		
+--------------------------------
+
+SELECT  pu.usename as Owner, pn.nspname schema_name,rel.relname AS obj_name
+FROM pg_class rel, pg_namespace pn , pg_user pu 
+    WHERE rel.relkind IN ('r','s','t') AND rel.relnamespace = pn.oid
+   and rel.relowner=pu.usesysid and pu.usename='ads_dev'
+        ORDER BY rel.relname;
+
+select pc.relname,pu.usename from pg_class pc, pg_user pu where pc.relowner=pu.usesysid
+		
+		
+---------------- table grants
+
+SELECT  'dsp_adsdev_prvl_rwrole',c.oid::regclass, array(select privs from unnest(ARRAY [ 
+( CASE WHEN has_table_privilege('dsp_adsdev_prvl_rwrole',c.oid,'SELECT') THEN 'SELECT' ELSE NULL END),
+(CASE WHEN has_table_privilege('dsp_adsdev_prvl_rwrole',c.oid,'INSERT') THEN 'INSERT' ELSE NULL END),
+(CASE WHEN has_table_privilege('dsp_adsdev_prvl_rwrole',c.oid,'UPDATE') THEN 'UPDATE' ELSE NULL END),
+(CASE WHEN has_table_privilege('dsp_adsdev_prvl_rwrole',c.oid,'DELETE') THEN 'DELETE' ELSE NULL END),
+(CASE WHEN has_table_privilege('dsp_adsdev_prvl_rwrole',c.oid,'TRUNCATE') THEN 'TRUNCATE' ELSE NULL END),
+(CASE WHEN has_table_privilege('dsp_adsdev_prvl_rwrole',c.oid,'TRIGGER') THEN 'TRIGGER' ELSE NULL END)]) foo(privs) where privs is not null) FROM pg_class c
+JOIN pg_namespace n on c.relnamespace=n.oid where n.nspname not in ('information_schema','pg_catalog','sys') and nspparent=0 and c.relkind='r' and
+has_table_privilege('dsp_adsdev_prvl_rwrole',c.oid,'SELECT, INSERT,UPDATE,DELETE,TRUNCATE,TRIGGER') AND has_schema_privilege('dsp_adsdev_prvl_rwrole',c.relnamespace,'USAGE');
+
+------------------- Ownership details -----------------------
+
+
+select  pu.usename as Owner, pn.nspname rel_name 
+from pg_namespace pn , pg_user pu  
+where  pn.nspowner= pu.usesysid and pn.nspowner=6641193
+union all
+select  pu.usename as Owner, rel.relname rel_name 
+from pg_class rel , pg_user pu  
+where   rel.relowner=pu.usesysid and rel.relowner=6641193
+
+
+
+
+
+SELECT pg_namespace.nspname, pg_proc.proname 
+FROM pg_proc, pg_namespace 
+WHERE pg_proc.pronamespace=pg_namespace.oid 
+   AND pg_proc.proname LIKE '%dblink%';
+   
+   
+   
+   
+
+   
+   
+ALTER DEFAULT PRIVILEGES FOR ROLE enterprisedb IN SCHEMA security REVOKE SELECT ON TABLES  FROM dsp_maint_nrml_rorole;
+
+
+
+
+SELECT pg_catalog.pg_get_userbyid(d.defaclrole) AS "Owner",
+  n.nspname AS "Schema",
+  CASE d.defaclobjtype WHEN 'r' THEN 'table' WHEN 'S' THEN 'sequence' WHEN 'f' THEN 'function' WHEN 'T' THEN 'type' END AS "Type",
+  pg_catalog.array_to_string(d.defaclacl, E'\n') AS "Access privileges"
+FROM pg_catalog.pg_default_acl d
+     LEFT JOIN pg_catalog.pg_namespace n ON n.oid = d.defaclnamespace
+ORDER BY 1, 2, 3;
+
+
+
+
+select * from (
+SELECT
+  use.usename as subject,
+  nsp.nspname as namespace,
+  c.relname as item, 
+  c.relkind as type,
+  use2.usename as owner,
+  c.relacl,
+  (use2.usename != use.usename and c.relacl::text !~ ('({|,)' || use.usename || '=')) as public
+FROM
+  pg_user use 
+  cross join pg_class c
+  left join pg_namespace nsp on (c.relnamespace = nsp.oid)
+  left join pg_user use2 on (c.relowner = use2.usesysid)
+WHERE 
+  c.relowner = use.usesysid or 
+  c.relacl::text ~ ('({|,)(|' || use.usename || ')=')
+ORDER BY
+  subject,
+  namespace,
+  item
+) where public=false and subject =
+
+
+
+
+======= DB Wise tablespace ========
+
+SELECT d.datname as "Name",
+       r.rolname as "Owner",
+       pg_catalog.pg_encoding_to_char(d.encoding) as "Encoding",
+       pg_catalog.shobj_description(d.oid, 'pg_database') as "Description",
+       t.spcname as "Tablespace"
+FROM pg_catalog.pg_database d
+  JOIN pg_catalog.pg_roles r ON d.datdba = r.oid
+  JOIN pg_catalog.pg_tablespace t on d.dattablespace = t.oid
+ORDER BY 1;
+
+
+https://blog.dbi-services.com/edb-postgres-advanced-server-9-5-new-features-profiles/
+
+
+
+https://blog.dbi-services.com/how-to-patch-postgres-plus-advanced-server/
+
+
+
+Satish Request 
+====================
+
+alter SCHEMA as400   owner to dsas_ppython_appi;
+
+select 'ALTER ' ||i.obj_type||' '|| i.obj_owner ||'.'||i.obj_name||' owner to dsas_ppython_appi;' from
+(select pn.nspname obj_owner, relname obj_name ,CASE relkind WHEN 'r' THEN 'table' WHEN 'S' THEN 'sequence' WHEN 'f' THEN 'function' WHEN 'T' THEN 'type' 
+WHEN 'v' THEN 'view' WHEN 'C' THEN 'column' END obj_type from pg_class pc , pg_namespace pn where pc.relnamespace=pn.oid and pn.nspname='as400' ) i;
+           
+select 'ALTER function '|| i.obj_owner ||'.'||i.obj_name||'('||pg_get_function_identity_arguments(function_objid )||') owner to dsas_ppython_appi;' from (
+ select pn.nspname obj_owner, funname obj_name ,'function' obj_type, pf.oid function_objid  from pg_function pf,  pg_namespace pn where pf.funnamespace=pn.oid and pn.nspname='as400') i;
+
+ 
+************************* Suman Request ************
+ 
+listing the details
+============================
+Tables, Sequences, views, type 
+=======================
+	select pr.rolname schema_owner, i.* from pg_roles pr , 
+	(select pn.nspowner schema_owner_id,  pn.nspname obj_schema,relname obj_name ,pr.rolname obj_owner,CASE relkind WHEN 'r' THEN 'table' WHEN 'S' THEN 'sequence' WHEN 'f' THEN 'function' WHEN 'T' THEN 'type' 
+	WHEN 'v' THEN 'view' WHEN 'C' THEN 'column' END obj_type from pg_class pc , pg_namespace pn, pg_roles pr where pc.relnamespace=pn.oid and pc.relowner=pr.oid
+	and pr.rolname like 'dsas_datical_app%' and pn.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')  and relkind<>'i' and  pn.nspname not like  'datical_track%'
+	and  pn.nspowner <> pc.relowner) i
+	where pr.oid=i.schema_owner_id 
+
+
+Functions
+=========================
+select pr.rolname schema_owner, i.* from pg_roles pr , 
+(select pn.nspowner schema_owner_id,  pn.nspname obj_schema,funname obj_name ,pr.rolname obj_owner from pg_function pf , pg_namespace pn, pg_roles pr where pf.funnamespace=pn.oid and funowner=pr.oid
+and pr.rolname like 'dsas_datical_app%' and pn.nspname NOT IN ('pg_catalog', 'information_schema') and pn.nspname not like  'datical_track%' ) i
+where pr.oid=i.schema_owner_id
+
+
+Generating the comamnd for altering
+===========================================
+Tables, Sequences, views, type 
+=======================
+
+select 'ALTER ' ||i.obj_type||' '|| i.obj_schema ||'.'||i.obj_name||' owner to '||schema_owner||';' from
+(select pr.rolname schema_owner, i.* from pg_roles pr , 
+(select pn.nspowner schema_owner_id,  pn.nspname obj_schema,relname obj_name ,pr.rolname obj_owner, CASE relkind WHEN 'r' THEN 'table' WHEN 'S' THEN 'sequence' WHEN 'f' THEN 'function' WHEN 'T' THEN 'type' 
+WHEN 'v' THEN 'view' WHEN 'C' THEN 'column' END obj_type from pg_class pc , pg_namespace pn, pg_roles pr where pc.relnamespace=pn.oid and pc.relowner=pr.oid
+and pr.rolname like 'dsas_datical_app%' and pn.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')  and relkind<>'i' and  pn.nspname not like  'datical_track%'
+and  pn.nspowner <> pc.relowner) i
+where pr.oid=i.schema_owner_id  ) i ;
+
+Functions
+=========================
+select 'ALTER function '|| i.obj_schema ||'.'||i.obj_name||'('||pg_get_function_identity_arguments(function_objid )||') owner to '||i.schema_owner||';' from 
+(select pr.rolname schema_owner, i.* from pg_roles pr , 
+(select pn.nspowner schema_owner_id,  pn.nspname obj_schema,funname obj_name ,pr.rolname obj_owner, pf.oid function_objid from pg_function pf , pg_namespace pn, pg_roles pr where pf.funnamespace=pn.oid and funowner=pr.oid
+and pr.rolname like 'dsas_datical_app%' and pn.nspname NOT IN ('pg_catalog', 'information_schema') and pn.nspname not like  'datical_track%' ) i
+where pr.oid=i.schema_owner_id) i;
+
+
+Make the below changes in LDB1551 and LDB1552 PostgreSQL production database servers
+
+1. As part of new audits, implement the changes for auditing all the SQL statements being executed in the Postgresql databases. 
+
+Same has been implemented in all the lower regions.
+
+2. Removal of the two mounts which is being used in postgresql, instead of these two mounts, creating two directories inside the  PostgreSQL data directory (/pg_data/PostgresAS/9.5AS/data/).
+
+   The mounts are /pg_stat_tmp  and /pgsql_tmp
+
+  /pg_stat_tmp   -> This mount is being used by PostgreSQl database through a symbolic link created under PostgreSQl data directory . This space is being used by stats collector process for online stats collection.
+ So create a directory named  /pg_stat_tmp in the data directory and removing this mount from the server.
+
+ /pgsql_tmp -> This mount is using for the temporary memory. 
+ Create directory named pgsql_tmp under /pg_data/PostgresAS/9.5AS/data/base . This will be used for temporary memory. 
+   
+   
+   REQ0018954  -- Prod 
+   REQ0018814  -- Non Prod
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   WITH r AS (SELECT 'role_to_revoke'::text As param_role_name)
+SELECT DISTINCT 'REVOKE ALL ON TABLE ' || table_schema || '.' || table_name || ' FROM ' || r.param_role_name || ';' As sql
+FROM information_schema.table_privileges CROSS JOIN r
+WHERE grantee ~* r.param_role_name
+UNION ALL
+SELECT DISTINCT 'REVOKE ALL ON FUNCTION ' || routine_schema || '.' || routine_name || '(' 
+    ||  pg_get_function_identity_arguments(
+        (regexp_matches(specific_name, E'.*\_([0-9]+)'))[1]::oid) || ') FROM ' || r.param_role_name || ';' As sql
+FROM information_schema.routine_privileges CROSS JOIN r
+WHERE grantee ~* r.param_role_name
+UNION ALL
+SELECT 'REVOKE ALL ON SEQUENCE ' || sequence_schema || '.' || sequence_name || ' FROM ' || r.param_role_name || ';' As sql
+FROM information_schema.sequences CROSS JOIN r ;
+
+
+
+
+
+
+--- User objects details
+
+select *  from
+(select i.obj_schema, pr.rolname schema_owner, i.obj_name, i.obj_type,i.obj_owner from pg_roles pr ,
+(select pn.nspowner schema_owner_id,  pn.nspname obj_schema,relname obj_name ,pr.rolname obj_owner, CASE relkind WHEN 'r' THEN 'table' WHEN 'S' THEN 'sequence' WHEN 'f' THEN 'function' WHEN 'T' THEN 'type'
+WHEN 'v' THEN 'view' WHEN 'C' THEN 'column' END obj_type from pg_class pc , pg_namespace pn, pg_roles pr where pc.relnamespace=pn.oid and pc.relowner=pr.oid
+and pn.nspname NOT IN ('dbo','public','sys','information_schema') and pn.nspname !~ '^pg_'  AND pn.nspname !~ '^dbms_' AND pn.nspname !~ '^utl_'  and relkind<>'i'
+and  pn.nspowner = pc.relowner ) i
+where pr.oid=i.schema_owner_id  and pr.rolname='p-uag9') i
+union all
+select * from
+(select i.obj_schema,pr.rolname schema_owner, i.obj_name,'function' as obj_type,i.obj_owner from pg_roles pr ,
+(select pn.nspowner schema_owner_id,  pn.nspname obj_schema,funname obj_name ,pr.rolname obj_owner, pf.oid function_objid from pg_function pf , pg_namespace pn, pg_roles pr where pf.funnamespace=pn.oid and pf.funowner=pr.oid
+and pn.nspowner = pf.funowner  and pn.nspname NOT IN ('dbo','public','sys','information_schema') and pn.nspname !~ '^pg_'  AND pn.nspname !~ '^dbms_' AND pn.nspname !~ '^utl_' ) i
+where pr.oid=i.schema_owner_id and pr.rolname='p-uag9') i
+
+
+
+--- User Dropping
+
+
+REASSIGN OWNED BY <dropping role/user > TO enterprisedb;
+DROP OWNED BY <dropping role >;
+DROP ROLE <ROLE/USER >;
+
+
+
+---------------------------------------------------------
+
+pg_dump -C -Fp -n ads -s adsprod > /home/enterprisedb/datical_refresh/prod/adsprod.sql
+
+
+
+******************************************************************************************************
+
+
+select type, objname, r1.rolname grantor, r2.rolname grantee, privilege_type
+    from
+    (select 
+      'database'::text as type, datname as objname, datistemplate, datallowconn, 
+      (aclexplode(datacl)).grantor as grantorI, 
+      (aclexplode(datacl)).grantee as granteeI,
+      (aclexplode(datacl)).privilege_type,
+      (aclexplode(datacl)).is_grantable
+    from pg_database) as db
+    join pg_roles r1 on db.grantorI = r1.oid
+    join pg_roles r2 on db.granteeI = r2.oid
+    where r2.rolname not in ('postgres', 'abd7')
+
+    union all
+
+    /* Schemas / Namespaces */
+    select type, objname, r1.rolname grantor, r2.rolname grantee, privilege_type from 
+    (select
+      'schema'::text as type, nspname as objname, 
+      (aclexplode(nspacl)).grantor as grantorI, 
+      (aclexplode(nspacl)).grantee as granteeI,
+      (aclexplode(nspacl)).privilege_type,
+      (aclexplode(nspacl)).is_grantable
+    from pg_catalog.pg_namespace) as ns
+    join pg_roles r1 on ns.grantorI = r1.oid
+    join pg_roles r2 on ns.granteeI = r2.oid
+    where r2.rolname not in ('postgres', 'abd7')
+
+    union all
+
+    /* Tabelas */
+    select 'tables'::text as type, table_name||' ('||table_schema||')' as objname, grantor, grantee, privilege_type  
+    from information_schema.role_table_grants 
+    where grantee not in ('postgres', 'abd7')
+    and table_schema not in ('information_schema', 'pg_catalog')
+    and grantor <> grantee
+
+    union all
+
+    /* Colunas (TODO: se o revoke on table from x retirar acesso das colunas, nao precisa desse bloco) */
+    select 
+      'columns'::text as type, column_name||' ('||table_name||')' as objname,
+      grantor, grantee, privilege_type
+    from information_schema.role_column_grants
+    where 
+    table_schema not in ('information_schema', 'pg_catalog')
+    and grantor <> grantee
+
+    union all
+
+    /* Funcoes / Procedures */
+    select 'routine'::text as type, routine_name as objname, grantor, grantee, privilege_type
+    from information_schema.role_routine_grants
+    where grantor <> grantee
+    and routine_schema not in ('information_schema', 'pg_catalog')
+
+    --union all information_schema.role_udt_grants
+
+    union all
+
+    /* Outros objetos */
+    select 'object'::text as type, object_name||'( '||object_type||')' as objname, grantor, grantee, privilege_type
+    from information_schema.role_usage_grants
+    where object_type <> 'COLLATION' and object_type <> 'DOMAIN'
+	
+	
+	
+	----------------------------------- SCHEMA With Default ACL=---------------------------
+	
+    select distinct type,objname, r1.rolname grantorDefault,r2.rolname granteeDefault,privilege_type_default,is_grantable_default from 
+    (select
+      'schema'::text as type, nspname as objname, 
+      (aclexplode(nspacl)).grantor as grantorI, 
+      (aclexplode(nspacl)).grantee as granteeI,
+      (aclexplode(nspacl)).privilege_type,
+      (aclexplode(nspacl)).is_grantable,
+       (aclexplode(defaclacl)).grantor as grantorDefault,
+     (aclexplode(defaclacl)).grantee as granteeDefault,
+          (aclexplode(defaclacl)).privilege_type privilege_type_default,
+      (aclexplode(defaclacl)).is_grantable is_grantable_default
+    FROM pg_default_acl a JOIN pg_namespace b ON a.defaclnamespace=b.oid ) as ns
+    join pg_roles r1 on ns.grantorDefault = r1.oid
+    join pg_roles r2 on ns.granteeDefault = r2.oid
+    where r2.rolname ~ 'nrml' and privilege_type_default='EXECUTE';
+
+---- User level roles assigned ----
+
+
+select a.nspname,a.member_name  from  (select distinct b.nspname, a.* from (select distinct * from  ( SELECT pr1.rolname AS role_name,
+                    pr2.rolname AS member_name
+                   FROM pg_auth_members pam1
+                     JOIN pg_roles pr1 ON pam1.roleid = pr1.oid
+                     JOIN pg_roles pr2 ON pam1.member = pr2.oid) a where a.member_name 
+                     in ( SELECT pg_roles_1.rolname
+                           FROM pg_roles pg_roles_1
+                          WHERE pg_roles_1.rolcanlogin = false) ) a,                    
+                         ( select distinct b.rolname, a.nspname from (select distinct nspname, (aclexplode(acl)).grantor as grantorI, 
+      (aclexplode(acl)).grantee as granteeI,
+      (aclexplode(acl)).privilege_type,
+      (aclexplode(acl)).is_grantable from(select distinct nspname, coalesce(relacl,nspacl) acl from pg_namespace a, pg_class b where a.oid=b.relnamespace and (relacl is not null or nspacl is not null)
+AND NOT (a.nspname ~ '^pg_'::text OR a.nspname = 'information_schema'::name OR a.nspname = 'sys'::name OR  a.nspname ~ '^dbms_'::text OR a.nspname ~ '^utl_'::text)
+) x  ) a,  pg_roles b where 
+      a.granteeI=b.oid) b
+  where b.rolname=a.role_name ) a,
+  (
+  SELECT pr1.rolname AS role_name,
+                    pr2.rolname AS member_name
+                   FROM pg_auth_members pam1
+                     JOIN pg_roles pr1 ON pam1.roleid = pr1.oid
+                     JOIN pg_roles pr2 ON pam1.member = pr2.oid
+					 where pr2.rolname='svc_alip_athpc1_rw_b'
+  ) b
+where  a.member_name=b.role_name
+  order by 1;
+  
+
+--------- Schema roles and permissions-----------------
+
+
+select distinct b.nspname, a.role_name,a.group_name, b.permission_list from (select distinct * from  ( SELECT pr1.rolname AS role_name,
+                    pr2.rolname AS group_name
+                   FROM pg_auth_members pam1
+                     JOIN pg_roles pr1 ON pam1.roleid = pr1.oid
+                     JOIN pg_roles pr2 ON pam1.member = pr2.oid) a where a.group_name 
+                     in ( SELECT pg_roles_1.rolname
+                           FROM pg_roles pg_roles_1
+                          WHERE pg_roles_1.rolcanlogin = false) ) a,                    
+                         ( select distinct b.rolname, a.nspname, array_agg(privilege_type) permission_list from (select distinct nspname, (aclexplode(acl)).grantor as grantorI, 
+      (aclexplode(acl)).grantee as granteeI,
+      (aclexplode(acl)).privilege_type,
+      (aclexplode(acl)).is_grantable from(select distinct nspname, coalesce(relacl,nspacl) acl from pg_namespace a, pg_class b where a.oid=b.relnamespace and (relacl is not null or nspacl is not null)
+AND NOT (a.nspname ~ '^pg_'::text OR a.nspname = 'information_schema'::name OR a.nspname = 'sys'::name OR  a.nspname ~ '^dbms_'::text OR a.nspname ~ '^utl_'::text)
+) x  ) a,  pg_roles b where 
+      a.granteeI=b.oid group by b.rolname, a.nspname) b
+  where b.rolname=a.role_name and b.nspname = <schema_name>  order by 1,2
+  
+
+	
+	--------Objects POrivileges -------------------------
+	SELECT nstr.member_name AS group_name,
+            objp.role_name,
+            objp.schema,
+            objp.object,
+            objp.object_type,
+            objp.privilege
+           FROM ( SELECT pr1.rolname AS role_name,
+                    pr2.rolname AS member_name
+                   FROM pg_auth_members pam1
+                     JOIN pg_roles pr1 ON pam1.roleid = pr1.oid
+                     JOIN pg_roles pr2 ON pam1.member = pr2.oid) nstr
+             JOIN ( SELECT pg_roles.rolname AS role_name,
+                    pg_namespace.nspname AS schema,
+                    pg_class.relname AS object,
+                        CASE pg_class.relkind
+                            WHEN 'r'::"char" THEN 'TABLE'::text
+                            WHEN 'v'::"char" THEN 'VIEW'::text
+                            WHEN 'S'::"char" THEN 'SEQUENCE'::text
+                            ELSE NULL::text
+                        END AS object_type,
+                    privs.priv AS privilege
+                   FROM pg_class
+                     JOIN pg_namespace ON pg_namespace.oid = pg_class.relnamespace,
+                    pg_roles,
+                    ( VALUES ('INSERT'::text,1), ('UPDATE'::text,2), ('DELETE'::text,3), ('TRUNCATE'::text,4), ('TRIGGER'::text,5), ('SELECT'::text,6)) privs(priv, privorder)
+                  WHERE (pg_class.relkind = ANY (ARRAY['r'::"char", 'v'::"char", 'S'::"char"])) AND has_table_privilege(pg_roles.oid, pg_class.oid, privs.priv) AND NOT (pg_namespace.nspname ~ '^pg_'::text OR pg_namespace.nspname = 'information_schema'::name OR pg_namespace.nspname = 'sys'::name OR pg_namespace.nspname = 'dbo'::name) AND (pg_roles.rolname IN ( SELECT pg_roles_1.rolname
+                           FROM pg_roles pg_roles_1
+                          WHERE pg_roles_1.rolcanlogin = false))
+                UNION
+                 SELECT pg_roles.rolname AS role_name,
+                    pg_namespace.nspname AS schema,
+                    pg_proc.proname ||'('||pg_get_function_identity_arguments(pg_proc.oid)||')' AS object,
+                    objtyp.objtyp AS object_type,
+                    privs.priv AS privilege
+                   FROM pg_proc
+                     JOIN pg_namespace ON pg_namespace.oid = pg_proc.pronamespace,
+                    pg_roles,
+                    ( VALUES ('EXECUTE'::text,1)) privs(priv, privorder),
+                    ( VALUES ('FUNCTION'::text,1)) objtyp(objtyp, objecttype)
+                  WHERE has_function_privilege(pg_roles.oid, pg_proc.oid, privs.priv) AND NOT (pg_namespace.nspname ~ '^pg_'::text OR pg_namespace.nspname = 'information_schema'::name OR pg_namespace.nspname = 'sys'::name OR pg_namespace.nspname = 'dbo'::name OR pg_namespace.nspname ~ '^dbms_'::text OR pg_namespace.nspname ~ '^utl_'::text) AND (pg_roles.rolname IN ( SELECT pg_roles_1.rolname
+                           FROM pg_roles pg_roles_1
+                          WHERE pg_roles_1.rolcanlogin = false))) objp ON objp.role_name = nstr.role_name
+          WHERE (nstr.member_name IN ( SELECT pg_roles.rolname
+                   FROM pg_roles
+                  WHERE pg_roles.rolcanlogin = false))
+                  and objp.role_name ~ 'nrml' and objp.privilege='EXECUTE'	
+				  
+				  ------------------------------ Dunamic sql generation for default role on function revoke -------
+				  
+				  
+select 'ALTER DEFAULt privileges for ROLE  '|| grantordefault||' in schema '|| objname||' revoke execute on function from '|| granteedefault||';' from (select distinct type,objname, r1.rolname grantorDefault,r2.rolname granteeDefault,privilege_type_default,is_grantable_default from 
+    (select
+      'schema'::text as type, nspname as objname, 
+      (aclexplode(nspacl)).grantor as grantorI, 
+      (aclexplode(nspacl)).grantee as granteeI,
+      (aclexplode(nspacl)).privilege_type,
+      (aclexplode(nspacl)).is_grantable,
+       (aclexplode(defaclacl)).grantor as grantorDefault,
+     (aclexplode(defaclacl)).grantee as granteeDefault,
+          (aclexplode(defaclacl)).privilege_type privilege_type_default,
+      (aclexplode(defaclacl)).is_grantable is_grantable_default
+    FROM pg_default_acl a JOIN pg_namespace b ON a.defaclnamespace=b.oid ) as ns
+    join pg_roles r1 on ns.grantorDefault = r1.oid
+    join pg_roles r2 on ns.granteeDefault = r2.oid
+    where r2.rolname ~ 'nrml' and privilege_type_default='EXECUTE') x;
+	
+	
+	----- Dynamic sql generationf or object access revoke ------
+	
+select 'REVOKE EXECUTE ON FUNCTION '|| schema||'.'||OBJECT||' FROM '||role_name||';' from
+(SELECT  nstr.member_name AS group_name,
+            objp.role_name,
+            objp.schema,
+            (objp.object::text),
+            objp.object_type,
+            objp.privilege
+           FROM ( SELECT pr1.rolname AS role_name,
+                    pr2.rolname AS member_name
+                   FROM pg_auth_members pam1
+                     JOIN pg_roles pr1 ON pam1.roleid = pr1.oid
+                     JOIN pg_roles pr2 ON pam1.member = pr2.oid) nstr
+             JOIN ( SELECT pg_roles.rolname AS role_name,
+                    pg_namespace.nspname AS schema,
+                    (pg_class.relname::text) AS object,
+                        CASE pg_class.relkind
+                            WHEN 'r'::"char" THEN 'TABLE'::text
+                            WHEN 'v'::"char" THEN 'VIEW'::text
+                            WHEN 'S'::"char" THEN 'SEQUENCE'::text
+                            ELSE NULL::text
+                        END AS object_type,
+                    privs.priv AS privilege
+                   FROM pg_class
+                     JOIN pg_namespace ON pg_namespace.oid = pg_class.relnamespace,
+                    pg_roles,
+                    ( VALUES ('INSERT'::text,1), ('UPDATE'::text,2), ('DELETE'::text,3), ('TRUNCATE'::text,4), ('TRIGGER'::text,5), ('SELECT'::text,6)) privs(priv, privorder)
+                  WHERE (pg_class.relkind = ANY (ARRAY['r'::"char", 'v'::"char", 'S'::"char"])) AND has_table_privilege(pg_roles.oid, pg_class.oid, privs.priv) AND NOT (pg_namespace.nspname ~ '^pg_'::text OR pg_namespace.nspname = 'information_schema'::name OR pg_namespace.nspname = 'sys'::name OR pg_namespace.nspname = 'dbo'::name) AND (pg_roles.rolname IN ( SELECT pg_roles_1.rolname
+                           FROM pg_roles pg_roles_1
+                          WHERE pg_roles_1.rolcanlogin = false))
+                UNION
+                 SELECT pg_roles.rolname AS role_name,
+                    pg_namespace.nspname AS schema,
+                    (pg_proc.proname ||'('||pg_get_function_identity_arguments(pg_proc.oid)||')'::text) AS object,
+                    objtyp.objtyp AS object_type,
+                    privs.priv AS privilege
+                   FROM pg_proc
+                     JOIN pg_namespace ON pg_namespace.oid = pg_proc.pronamespace,
+                    pg_roles,
+                    ( VALUES ('EXECUTE'::text,1)) privs(priv, privorder),
+                    ( VALUES ('FUNCTION'::text,1)) objtyp(objtyp, objecttype)
+                  WHERE has_function_privilege(pg_roles.oid, pg_proc.oid, privs.priv) AND NOT (pg_namespace.nspname ~ '^pg_'::text OR pg_namespace.nspname = 'information_schema'::name OR pg_namespace.nspname = 'sys'::name OR pg_namespace.nspname = 'dbo'::name OR pg_namespace.nspname ~ '^dbms_'::text OR pg_namespace.nspname ~ '^utl_'::text) AND (pg_roles.rolname IN ( SELECT pg_roles_1.rolname
+                           FROM pg_roles pg_roles_1
+                          WHERE pg_roles_1.rolcanlogin = false))) objp ON objp.role_name = nstr.role_name
+          WHERE (nstr.member_name IN ( SELECT pg_roles.rolname
+                   FROM pg_roles
+                  WHERE pg_roles.rolcanlogin = false))
+                  and objp.role_name ~ 'nrml' and objp.privilege='EXECUTE') x
+				  
+				  
+				  
+				  
+------------------------------------ USers List -------------------------
+
+select distinct a.* from (select distinct * from  ( SELECT pr1.rolname AS role_name,
+                    pr2.rolname AS member_name
+                   FROM pg_auth_members pam1
+                     JOIN pg_roles pr1 ON pam1.roleid = pr1.oid
+                     JOIN pg_roles pr2 ON pam1.member = pr2.oid) a where a.member_name 
+                     in ( SELECT pg_roles_1.rolname
+                           FROM pg_roles pg_roles_1
+                          WHERE pg_roles_1.rolcanlogin = false) ) a,                    
+                         ( select distinct b.rolname from (select  (aclexplode(defaclacl)).grantor as grantorI, 
+      (aclexplode(defaclacl)).grantee as granteeI,
+      (aclexplode(defaclacl)).privilege_type,
+      (aclexplode(defaclacl)).is_grantable from pg_default_acl a ) a,  pg_roles b where 
+      a.granteeI=b.oid) b
+  where b.rolname=a.role_name
+  order by 1;
+  
+  
+  -------- Db schema Withschema privileges -----------------
+  
+select a.nspname,b.schemaowner,a.role_name,a.member_name  from  (select distinct b.nspname, a.* from (select distinct * from  ( SELECT pr1.rolname AS role_name,
+                    pr2.rolname AS member_name
+                   FROM pg_auth_members pam1
+                     JOIN pg_roles pr1 ON pam1.roleid = pr1.oid
+                     JOIN pg_roles pr2 ON pam1.member = pr2.oid) a where a.member_name 
+                     in ( SELECT pg_roles_1.rolname
+                           FROM pg_roles pg_roles_1
+                          WHERE pg_roles_1.rolcanlogin = false) ) a,                    
+                         ( select distinct b.rolname, a.nspname from (select distinct nspname, (aclexplode(acl)).grantor as grantorI, 
+      (aclexplode(acl)).grantee as granteeI,
+      (aclexplode(acl)).privilege_type,
+      (aclexplode(acl)).is_grantable from(select distinct nspname, coalesce(relacl,nspacl) acl from pg_namespace a, pg_class b where a.oid=b.relnamespace(+) and (relacl is not null or nspacl is not null)
+AND NOT (a.nspname ~ '^pg_'::text OR a.nspname = 'information_schema'::name OR a.nspname = 'sys'::name OR a.nspname = 'dbo'::name OR a.nspname ~ '^dbms_'::text OR a.nspname ~ '^utl_'::text)
+)  ) a,  pg_roles b where 
+      a.granteeI=b.oid) b
+  where b.rolname=a.role_name ) a,
+  (select a.nspname, b.rolname as schemaowner from pg_namespace a, pg_roles b where b.oid=a.nspowner
+and not (a.nspname ~ '^pg_'::text OR a.nspname = 'information_schema'::name OR a.nspname = 'sys'::name OR a.nspname = 'dbo'::name OR a.nspname ~ '^dbms_'::text OR a.nspname ~ '^utl_'::text)) b
+where a.nspname=b.nspname 
+  order by 1;
+  
+  
+ select a.nspname,b.schemaowner,a.role_name,a.member_name  from  (select distinct b.nspname, a.* from (select distinct * from  ( SELECT pr1.rolname AS role_name,
+                    pr2.rolname AS member_name
+                   FROM pg_auth_members pam1
+                     JOIN pg_roles pr1 ON pam1.roleid = pr1.oid
+                     JOIN pg_roles pr2 ON pam1.member = pr2.oid) a where a.member_name 
+                     in ( SELECT pg_roles_1.rolname
+                           FROM pg_roles pg_roles_1
+                          WHERE pg_roles_1.rolcanlogin = false) ) a,                    
+                         ( select distinct b.rolname, a.nspname from (select distinct nspname, (aclexplode(acl)).grantor as grantorI, 
+      (aclexplode(acl)).grantee as granteeI,
+      (aclexplode(acl)).privilege_type,
+      (aclexplode(acl)).is_grantable from(select distinct nspname, coalesce(relacl,nspacl) acl from pg_namespace a, pg_class b where a.oid=b.relnamespace(+) and (relacl is not null or nspacl is not null)
+AND NOT (a.nspname ~ '^pg_'::text OR a.nspname = 'information_schema'::name OR a.nspname = 'sys'::name OR a.nspname = 'dbo'::name OR a.nspname ~ '^dbms_'::text OR a.nspname ~ '^utl_'::text)
+)  ) a,  pg_roles b where 
+      a.granteeI=b.oid) b
+  where b.rolname=a.role_name ) a,
+  (select distinct a.nspname, a.schemaowner  from (select distinct a.nspname,a.oid, b.rolname as schemaowner from pg_namespace a, pg_roles b   where b.oid=a.nspowner and 
+not (a.nspname ~ '^pg_'::text OR a.nspname = 'information_schema'::name OR a.nspname = 'sys'::name OR a.nspname = 'dbo'::name OR a.nspname ~ '^dbms_'::text OR a.nspname ~ '^utl_'::text)) a
+ left join pg_class c on a.oid=c.relnamespace) b
+where a.nspname=b.nspname  and a.nspname in('wso2','wso2v2','datical_trackinsops','empower','print_reporting','process_schema','public','robotics_reporting','monster','public','dsas_oportcom_own','dsas_oportcus_own','dsas_oportfbk_own','dsas_oportjcr_own','public','iam','public','salt','datical_trackstp','public','stp','public','public','public','public','public','public','public','public','public','public','public','public','watchdogtest')
+ order by 1;
+ 
+ 
+ 
+ select a.nspname,b.schemaowner,'CREATE ROLE '||a.role_name||' WITH NOLOGIN;'||chr(10),'CREATE ROLE '||a.member_name || ' WITH NOLOGIN;'||chr(10)||' GRANT '|| a.member_name ||' TO '|| a.role_name||';'  from  (select distinct b.nspname, a.* from (select distinct * from  ( SELECT pr1.rolname AS role_name,
+                    pr2.rolname AS member_name
+                   FROM pg_auth_members pam1
+                     JOIN pg_roles pr1 ON pam1.roleid = pr1.oid
+                     JOIN pg_roles pr2 ON pam1.member = pr2.oid) a where a.member_name 
+                     in ( SELECT pg_roles_1.rolname
+                           FROM pg_roles pg_roles_1
+                          WHERE pg_roles_1.rolcanlogin = false) ) a,                    
+                         ( select distinct b.rolname, a.nspname from (select distinct nspname, (aclexplode(acl)).grantor as grantorI, 
+      (aclexplode(acl)).grantee as granteeI,
+      (aclexplode(acl)).privilege_type,
+      (aclexplode(acl)).is_grantable from(select distinct nspname, coalesce(relacl,nspacl) acl from pg_namespace a, pg_class b where a.oid=b.relnamespace(+) and (relacl is not null or nspacl is not null)
+AND NOT (a.nspname ~ '^pg_'::text OR a.nspname = 'information_schema'::name OR a.nspname = 'sys'::name OR a.nspname = 'dbo'::name OR a.nspname ~ '^dbms_'::text OR a.nspname ~ '^utl_'::text)
+)  ) a,  pg_roles b where 
+      a.granteeI=b.oid) b
+  where b.rolname=a.role_name ) a,
+  (select distinct a.nspname, a.schemaowner  from (select distinct a.nspname,a.oid, b.rolname as schemaowner from pg_namespace a, pg_roles b   where b.oid=a.nspowner and 
+not (a.nspname ~ '^pg_'::text OR a.nspname = 'information_schema'::name OR a.nspname = 'sys'::name OR a.nspname = 'dbo'::name OR a.nspname ~ '^dbms_'::text OR a.nspname ~ '^utl_'::text)) a
+ left join pg_class c on a.oid=c.relnamespace) b
+where a.nspname=b.nspname  and a.nspname in('wso2','wso2v2','datical_trackinsops','empower','print_reporting','process_schema','public','robotics_reporting','monster','public','dsas_oportcom_own','dsas_oportcus_own','dsas_oportfbk_own','dsas_oportjcr_own','public','iam','public','salt','datical_trackstp','public','stp','public','public','public','public','public','public','public','public','public','public','public','public','watchdogtest')
+
+ order by 1;
+
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+  select a.nspname,b.schemaowner,'CREATE ROLE '||a.role_name||' WITH NOLOGIN;'||chr(10),'CREATE ROLE '||a.member_name || ' WITH NOLOGIN;'||chr(10)||' GRANT '|| a.member_name ||' TO '|| a.role_name||';'  from  (select distinct b.nspname, a.* from (select distinct * from  ( SELECT pr1.rolname AS role_name,
+                    pr2.rolname AS member_name
+                   FROM pg_auth_members pam1
+                     JOIN pg_roles pr1 ON pam1.roleid = pr1.oid
+                     JOIN pg_roles pr2 ON pam1.member = pr2.oid) a where a.member_name 
+                     in ( SELECT pg_roles_1.rolname
+                           FROM pg_roles pg_roles_1
+                          WHERE pg_roles_1.rolcanlogin = false) ) a,                    
+                         ( select distinct b.rolname, a.nspname from (select distinct nspname, (aclexplode(acl)).grantor as grantorI, 
+      (aclexplode(acl)).grantee as granteeI,
+      (aclexplode(acl)).privilege_type,
+      (aclexplode(acl)).is_grantable from(select distinct nspname, coalesce(relacl,nspacl) acl from pg_namespace a, pg_class b where a.oid=b.relnamespace(+) and (relacl is not null or nspacl is not null)
+AND NOT (a.nspname ~ '^pg_'::text OR a.nspname = 'information_schema'::name OR a.nspname = 'sys'::name OR a.nspname = 'dbo'::name OR a.nspname ~ '^dbms_'::text OR a.nspname ~ '^utl_'::text)
+)  ) a,  pg_roles b where 
+      a.granteeI=b.oid) b
+  where b.rolname=a.role_name ) a,
+  (select distinct a.nspname, a.schemaowner  from (select distinct a.nspname,a.oid, b.rolname as schemaowner from pg_namespace a, pg_roles b   where b.oid=a.nspowner and 
+not (a.nspname ~ '^pg_'::text OR a.nspname = 'information_schema'::name OR a.nspname = 'sys'::name OR a.nspname = 'dbo'::name OR a.nspname ~ '^dbms_'::text OR a.nspname ~ '^utl_'::text)) a
+ left join pg_class c on a.oid=c.relnamespace) b
+where a.nspname=b.nspname  and a.role_name like '%actdev%'
+
+ 
+
+
+----------------------------------
+
+
+
+select * from(
+select a.nspname,b.schemaowner,'CREATE ROLE '||a.role_name||' WITH NOLOGIN;'||chr(10),'CREATE ROLE '||a.member_name || ' WITH NOLOGIN;'||chr(10)||' GRANT '|| a.member_name ||' TO '|| a.role_name||';'  from  (select distinct b.nspname, a.* from (select distinct * from  ( SELECT pr1.rolname AS role_name,
+                    pr2.rolname AS member_name
+                   FROM pg_auth_members pam1
+                     JOIN pg_roles pr1 ON pam1.roleid = pr1.oid
+                     JOIN pg_roles pr2 ON pam1.member = pr2.oid) a where a.member_name 
+                     in ( SELECT pg_roles_1.rolname
+                           FROM pg_roles pg_roles_1
+                          WHERE pg_roles_1.rolcanlogin = false) ) a,                    
+                         ( select distinct b.rolname, a.nspname from (select distinct nspname, (aclexplode(acl)).grantor as grantorI, 
+      (aclexplode(acl)).grantee as granteeI,
+      (aclexplode(acl)).privilege_type,
+      (aclexplode(acl)).is_grantable from(select distinct nspname, coalesce(relacl,nspacl) acl from pg_namespace a, pg_class b where a.oid=b.relnamespace(+) and (relacl is not null or nspacl is not null)
+AND NOT (a.nspname ~ '^pg_'::text OR a.nspname = 'information_schema'::name OR a.nspname = 'sys'::name OR a.nspname = 'dbo'::name OR a.nspname ~ '^dbms_'::text OR a.nspname ~ '^utl_'::text)
+)  ) a,  pg_roles b where 
+      a.granteeI=b.oid) b
+  where b.rolname=a.role_name ) a,
+  (select distinct a.nspname, a.schemaowner  from (select distinct a.nspname,a.oid, b.rolname as schemaowner from pg_namespace a, pg_roles b   where b.oid=a.nspowner and 
+not (a.nspname ~ '^pg_'::text OR a.nspname = 'information_schema'::name OR a.nspname = 'sys'::name OR a.nspname = 'dbo'::name OR a.nspname ~ '^dbms_'::text OR a.nspname ~ '^utl_'::text)) a
+ left join pg_class c on a.oid=c.relnamespace) b
+where a.nspname=b.nspname  and a.nspname in('wso2','wso2v2','datical_trackinsops','empower','print_reporting','process_schema','public','robotics_reporting','monster','public','dsas_oportcom_own','dsas_oportcus_own','dsas_oportfbk_own','dsas_oportjcr_own','public','iam','public','salt','datical_trackstp','public','stp','public','public','public','public','public','public','public','public','public','public','public','public','watchdogtest')
+union
+select distinct a.nspname, a.schemaowner , null as role_name , null as member_name from (select distinct a.nspname,a.oid, b.rolname as schemaowner from pg_namespace a, pg_roles b   where b.oid=a.nspowner and 
+not (a.nspname ~ '^pg_'::text OR a.nspname = 'information_schema'::name OR a.nspname = 'sys'::name OR a.nspname = 'dbo'::name OR a.nspname ~ '^dbms_'::text OR a.nspname ~ '^utl_'::text)) a
+ left join pg_class c on a.oid=c.relnamespace and a.nspname not in ( select a.nspname from  (select distinct b.nspname, a.* from (select distinct * from  ( SELECT pr1.rolname AS role_name,
+                    pr2.rolname AS member_name
+                   FROM pg_auth_members pam1
+                     JOIN pg_roles pr1 ON pam1.roleid = pr1.oid
+                     JOIN pg_roles pr2 ON pam1.member = pr2.oid) a where a.member_name 
+                     in ( SELECT pg_roles_1.rolname
+                           FROM pg_roles pg_roles_1
+                          WHERE pg_roles_1.rolcanlogin = false) ) a,                    
+                         ( select distinct b.rolname, a.nspname from (select distinct nspname, (aclexplode(acl)).grantor as grantorI, 
+      (aclexplode(acl)).grantee as granteeI,
+      (aclexplode(acl)).privilege_type,
+      (aclexplode(acl)).is_grantable from(select distinct nspname, coalesce(relacl,nspacl) acl from pg_namespace a, pg_class b where a.oid=b.relnamespace(+) and (relacl is not null or nspacl is not null)
+AND NOT (a.nspname ~ '^pg_'::text OR a.nspname = 'information_schema'::name OR a.nspname = 'sys'::name OR a.nspname = 'dbo'::name OR a.nspname ~ '^dbms_'::text OR a.nspname ~ '^utl_'::text)
+)  ) a,  pg_roles b where 
+      a.granteeI=b.oid) b
+  where b.rolname=a.role_name ) a,
+  (select distinct a.nspname, a.schemaowner  from (select distinct a.nspname,a.oid, b.rolname as schemaowner from pg_namespace a, pg_roles b   where b.oid=a.nspowner and 
+not (a.nspname ~ '^pg_'::text OR a.nspname = 'information_schema'::name OR a.nspname = 'sys'::name OR a.nspname = 'dbo'::name OR a.nspname ~ '^dbms_'::text OR a.nspname ~ '^utl_'::text)) a
+ left join pg_class c on a.oid=c.relnamespace) b
+where a.nspname=b.nspname  and a.nspname in('wso2','wso2v2','datical_trackinsops','empower','print_reporting','process_schema','public','robotics_reporting','monster','public','dsas_oportcom_own','dsas_oportcus_own','dsas_oportfbk_own','dsas_oportjcr_own','public','iam','public','salt','datical_trackstp','public','stp','public','public','public','public','public','public','public','public','public','public','public','public','watchdogtest'))
+)
+
+
+
+select 'CREATE ROLE '||a.role_name||' WITH NOLOGIN;'||chr(10),'CREATE ROLE '||a.member_name || ' WITH NOLOGIN;'||chr(10)||' GRANT '|| a.member_name ||' TO '|| a.role_name||';'  from  (select distinct  a.* from (select distinct * from  ( SELECT pr1.rolname AS role_name,
+                    pr2.rolname AS member_name
+                   FROM pg_auth_members pam1
+                     JOIN pg_roles pr1 ON pam1.roleid = pr1.oid
+                     JOIN pg_roles pr2 ON pam1.member = pr2.oid) a where a.member_name 
+                     in ( SELECT pg_roles_1.rolname
+                           FROM pg_roles pg_roles_1
+                          WHERE pg_roles_1.rolcanlogin = false) ) a,                    
+                         ( select distinct b.rolname from (select distinct  (aclexplode(acl)).grantor as grantorI, 
+      (aclexplode(acl)).grantee as granteeI,
+      (aclexplode(acl)).privilege_type,
+      (aclexplode(acl)).is_grantable from(select defaclacl as acl from  pg_default_acl)  ) a,  pg_roles b where 
+      a.granteeI=b.oid) b
+  where b.rolname=a.role_name ) a
+  
+  
+ ******************************************* SQL Scripts **************************************************************
+ 
+ 
+select a.nspname,a.command,b.command,b.priv from (select nspname,privtype.priv ,'p'||'_<hostname>_'||current_database()||'_'||nspname||'_'||'u'||privtype.priv|| grouptype.grppriv|| regiontype.regpriv as command from pg_namespace a ,
+( VALUES ('ro'::text,1), ('rw'::text,2), ('ex'::text,3) ) privtype(priv, privorder) ,
+ ( VALUES ('r'::text,1), ('g'::text,2)) grouptype(grppriv, grpprivorder) ,
+  ( VALUES ('i'::text,1), ('d'::text,2), ('s'::text,3), ('q'::text,4), ('p'::text,5)) regiontype(regpriv, regprivorder) 
+where not (a.nspname ~ '^pg_'::text OR a.nspname = 'information_schema'::name OR a.nspname = 'sys'::name OR a.nspname = 'dbo'::name OR a.nspname ~ '^dbms_'::text OR a.nspname ~ '^utl_'::text)
+and regiontype.regpriv='i'  and grouptype.grppriv='r' ) a,
+(select nspname,privtype.priv,'p'||'_<hostname>_'||current_database()||'_'||nspname||'_'||'u'||privtype.priv|| grouptype.grppriv|| regiontype.regpriv as command from pg_namespace a ,
+( VALUES ('ro'::text,1), ('rw'::text,2), ('ex'::text,3) ) privtype(priv, privorder) ,
+ ( VALUES ('r'::text,1), ('g'::text,2)) grouptype(grppriv, grpprivorder) ,
+  ( VALUES ('i'::text,1), ('d'::text,2), ('s'::text,3), ('q'::text,4), ('p'::text,5)) regiontype(regpriv, regprivorder) 
+where not (a.nspname ~ '^pg_'::text OR a.nspname = 'information_schema'::name OR a.nspname = 'sys'::name OR a.nspname = 'dbo'::name OR a.nspname ~ '^dbms_'::text OR a.nspname ~ '^utl_'::text)
+and regiontype.regpriv='i' and grouptype.grppriv='g') b  where a.nspname=b.nspname and a.priv=b.priv
+order by 1 
+
+
+
+
+
+select nspname,a.member_name,c.member_name as group_name from  ( SELECT pr1.rolname AS role_name,
+                    pr2.rolname AS member_name
+                   FROM pg_auth_members pam1
+                     JOIN pg_roles pr1 ON pam1.roleid = pr1.oid
+                     JOIN pg_roles pr2 ON pam1.member = pr2.oid) a 
+join  (
+select nspname,a.member_name  from  (select distinct  a.*, b.* from (select distinct * from  ( SELECT pr1.rolname AS role_name,
+                    pr2.rolname AS member_name
+                   FROM pg_auth_members pam1
+                     JOIN pg_roles pr1 ON pam1.roleid = pr1.oid
+                     JOIN pg_roles pr2 ON pam1.member = pr2.oid) a where a.member_name 
+                     in ( SELECT pg_roles_1.rolname
+                           FROM pg_roles pg_roles_1
+                          WHERE pg_roles_1.rolcanlogin = false) ) a,                    
+                           ( select distinct nspname,b.rolname from (select distinct nspname, (aclexplode(acl)).grantor as grantorI, 
+      (aclexplode(acl)).grantee as granteeI,
+      (aclexplode(acl)).privilege_type,
+      (aclexplode(acl)).is_grantable from(select nspname,defaclacl as acl from  pg_default_acl a, pg_namespace b where
+                                         a.defaclnamespace=b.oid)  ) a,  pg_roles b where 
+      a.granteeI=b.oid ) b
+  where b.rolname=a.role_name ) a) c on role_name =c.member_name
+  where a.member_name 
+                     in ( SELECT pg_roles_1.rolname
+                           FROM pg_roles pg_roles_1
+                          WHERE pg_roles_1.rolcanlogin = true) order by 1 ,3
+						  
+						  
+						  
+						  
+						  
+----------------------------- old vs new roles access--------						  
+						  
+select a.*,b.* from (select nspname,a.member_name,c.member_name as group_name, current_database() as DB_name from  ( SELECT pr1.rolname AS role_name,
+                    pr2.rolname AS member_name
+                   FROM pg_auth_members pam1
+                     JOIN pg_roles pr1 ON pam1.roleid = pr1.oid
+                     JOIN pg_roles pr2 ON pam1.member = pr2.oid) a 
+join  (
+select nspname,a.member_name,privilege_type  from  (select distinct  a.*, b.* from (select distinct * from  ( SELECT pr1.rolname AS role_name,
+                    pr2.rolname AS member_name
+                   FROM pg_auth_members pam1
+                     JOIN pg_roles pr1 ON pam1.roleid = pr1.oid
+                     JOIN pg_roles pr2 ON pam1.member = pr2.oid) a where a.member_name 
+                     in ( SELECT pg_roles_1.rolname
+                           FROM pg_roles pg_roles_1
+                          WHERE pg_roles_1.rolcanlogin = false) ) a,                    
+                           ( select distinct nspname,b.rolname,privilege_type from (select distinct nspname, (aclexplode(acl)).grantor as grantorI, 
+      (aclexplode(acl)).grantee as granteeI,
+      (aclexplode(acl)).privilege_type,
+      (aclexplode(acl)).is_grantable from(select nspname,defaclacl as acl from  pg_default_acl a, pg_namespace b where
+                                         a.defaclnamespace=b.oid)  ) a,  pg_roles b where 
+      a.granteeI=b.oid ) b
+  where b.rolname=a.role_name ) a) c on role_name =c.member_name
+  where a.member_name 
+                     in ( SELECT pg_roles_1.rolname
+                           FROM pg_roles pg_roles_1
+                          WHERE pg_roles_1.rolcanlogin = true)) a,  
+						  
+						  (select nspname,current_database() as DB_NAME, 'p'||'_<hostname>_'||current_database()||'_'||nspname||'_'||'u'||privtype.priv|| grouptype.grppriv|| regiontype.regpriv||';' as Command from pg_namespace a ,
+( VALUES ('ro'::text,1), ('rw'::text,2), ('ex'::text,3) ) privtype(priv, privorder) ,
+ ( VALUES ('r'::text,1), ('g'::text,2)) grouptype(grppriv, grpprivorder) ,
+  ( VALUES ('i'::text,1), ('d'::text,2), ('s'::text,3), ('q'::text,4), ('p'::text,5)) regiontype(regpriv, regprivorder) 
+where not (a.nspname ~ '^pg_'::text OR a.nspname = 'information_schema'::name OR a.nspname = 'sys'::name OR a.nspname = 'dbo'::name OR a.nspname ~ '^dbms_'::text OR a.nspname ~ '^utl_'::text)
+and regiontype.regpriv='i') b 
+where a.nspname=b.nspname and a.DB_name=b.DB_name
+
+
+
+
+
+
+---------------------------Drilling down currentacces vs new access--------------------------------------------------
+----- New Role  Creation Commands ----
+
+select a.nspname, 'CREATE ROLE ' ||a.command ||' with nologin;' as role_command, ' CREATE ROLE ' || b.command|| ' with nologin;',' GRANT '||a.command|| ' to '|| b.command||';',b.priv from (select nspname,privtype.priv ,'p'||'_<hostname>_'||current_database()||'_'||nspname||'_'||'u'||privtype.priv|| grouptype.grppriv|| regiontype.regpriv as command from pg_namespace a ,
+( VALUES ('ro'::text,1), ('rw'::text,2), ('ex'::text,3) ) privtype(priv, privorder) ,
+ ( VALUES ('r'::text,1), ('g'::text,2)) grouptype(grppriv, grpprivorder) ,
+  ( VALUES ('i'::text,1), ('d'::text,2), ('s'::text,3), ('q'::text,4), ('p'::text,5)) regiontype(regpriv, regprivorder) 
+where not (a.nspname ~ '^pg_'::text OR a.nspname = 'information_schema'::name OR a.nspname = 'sys'::name OR a.nspname = 'dbo'::name OR a.nspname ~ '^dbms_'::text OR a.nspname ~ '^utl_'::text)
+and regiontype.regpriv='i'  and grouptype.grppriv='r' ) a,
+(select nspname,privtype.priv,'p'||'_<hostname>_'||current_database()||'_'||nspname||'_'||'u'||privtype.priv|| grouptype.grppriv|| regiontype.regpriv as command from pg_namespace a ,
+( VALUES ('ro'::text,1), ('rw'::text,2), ('ex'::text,3) ) privtype(priv, privorder) ,
+ ( VALUES ('r'::text,1), ('g'::text,2)) grouptype(grppriv, grpprivorder) ,
+  ( VALUES ('i'::text,1), ('d'::text,2), ('s'::text,3), ('q'::text,4), ('p'::text,5)) regiontype(regpriv, regprivorder) 
+where not (a.nspname ~ '^pg_'::text OR a.nspname = 'information_schema'::name OR a.nspname = 'sys'::name OR a.nspname = 'dbo'::name OR a.nspname ~ '^dbms_'::text OR a.nspname ~ '^utl_'::text)
+and regiontype.regpriv='i' and grouptype.grppriv='g') b  where a.nspname=b.nspname and a.priv=b.priv
+order by 1 
+
+
+--- Modified with default ACL
+
+select a.nspname, 'CREATE ROLE ' ||a.command ||' with nologin;' as role_command, ' CREATE ROLE ' || b.command|| ' with nologin;' as Group_command,' GRANT '||a.command|| ' to '|| b.command||';'
+as role_to_group_command,b.priv, replace(b.priv_grants,'@@',a.command) from 
+(
+
+select nspname,privtype.priv ,replace(privtype.privcommand,'##',nspname) as priv_grants ,'p'||'_<hostname>_'||current_database()||'_'||nspname||'_'||'u'||privtype.priv|| grouptype.grppriv|| regiontype.regpriv as command from pg_namespace a ,
+( VALUES ('ro'::text,'ALTER DEFAULT PRIVILEGES FOR ROLE enterprisedb in SCHEMA ## GRANT USAGE, SELECT ON TABLES TO @@;',1), ('rw'::text,'ALTER DEFAULT PRIVILEGES FOR ROLE enterprisedb in SCHEMA ## GRANT USAGE,UPDATE, DELETE, SELECT, INSERT ON TABLES TO @@; ALTER DEFAULT PRIVILEGES FOR ROLE enterprisedb in SCHEMA ## GRANT USAGE, SELEC ON SEQUENCES TO @@; '::text,2), ('ex'::text,'ALTER DEFAULT PRIVILEGES FOR ROLE enterprisedb in SCHEMA ## GRANT EXECUTE ON FUNCTIONS To @@;'::text, 3) ) privtype(priv,privcommand, privorder) ,
+ ( VALUES ('r'::text,1), ('g'::text,2)) grouptype(grppriv, grpprivorder) ,
+  ( VALUES ('i'::text,1), ('d'::text,2), ('s'::text,3), ('q'::text,4), ('p'::text,5)) regiontype(regpriv, regprivorder) 
+where not (a.nspname ~ '^pg_'::text OR a.nspname = 'information_schema'::name OR a.nspname = 'sys'::name OR a.nspname = 'dbo'::name OR a.nspname ~ '^dbms_'::text OR a.nspname ~ '^utl_'::text)
+and regiontype.regpriv='i'  and grouptype.grppriv='r' ) a,
+(select nspname,privtype.priv,replace(privtype.privcommand,'##',nspname) as priv_grants,'p'||'_<hostname>_'||current_database()||'_'||nspname||'_'||'u'||privtype.priv|| grouptype.grppriv|| regiontype.regpriv as command from pg_namespace a ,
+( VALUES ('ro'::text,'ALTER DEFAULT PRIVILEGES FOR ROLE enterprisedb in SCHEMA ## GRANT USAGE, SELECT ON TABLES TO @@;',1), ('rw'::text,'ALTER DEFAULT PRIVILEGES FOR ROLE enterprisedb in SCHEMA ## GRANT USAGE,UPDATE, DELETE, SELECT, INSERT ON TABLES TO @@; ALTER DEFAULT PRIVILEGES FOR ROLE enterprisedb in SCHEMA ## GRANT USAGE, SELEC ON SEQUENCES TO @@; '::text,2), ('ex'::text,'ALTER DEFAULT PRIVILEGES FOR ROLE enterprisedb in SCHEMA ## GRANT EXECUTE ON FUNCTIONS To @@;'::text, 3) ) privtype(priv,privcommand, privorder) ,
+ ( VALUES ('r'::text,1), ('g'::text,2)) grouptype(grppriv, grpprivorder) ,
+  ( VALUES ('i'::text,1), ('d'::text,2), ('s'::text,3), ('q'::text,4), ('p'::text,5)) regiontype(regpriv, regprivorder) 
+where not (a.nspname ~ '^pg_'::text OR a.nspname = 'information_schema'::name OR a.nspname = 'sys'::name OR a.nspname = 'dbo'::name OR a.nspname ~ '^dbms_'::text OR a.nspname ~ '^utl_'::text)
+and regiontype.regpriv='i' and grouptype.grppriv='g') b  where a.nspname=b.nspname and a.priv=b.priv;
+
+
+------ Below is the grants commands------
+
+
+
+--Execute Access
+select b.db_name,b.nspname,a.privilege_type,a.group_name,a.member_name,b.command as new_role from (select nspname,a.member_name,c.member_name as group_name, current_database() as DB_name,privilege_type from  ( SELECT pr1.rolname AS role_name,
+                    pr2.rolname AS member_name
+                   FROM pg_auth_members pam1
+                     JOIN pg_roles pr1 ON pam1.roleid = pr1.oid
+                     JOIN pg_roles pr2 ON pam1.member = pr2.oid) a 
+join  (
+select nspname,a.member_name,privilege_type  from  (select distinct  a.*, b.* from (select distinct * from  ( SELECT pr1.rolname AS role_name,
+                    pr2.rolname AS member_name
+                   FROM pg_auth_members pam1
+                     JOIN pg_roles pr1 ON pam1.roleid = pr1.oid
+                     JOIN pg_roles pr2 ON pam1.member = pr2.oid) a where a.member_name 
+                     in ( SELECT pg_roles_1.rolname
+                           FROM pg_roles pg_roles_1
+                          WHERE pg_roles_1.rolcanlogin = false) ) a,                    
+                           ( select distinct nspname,b.rolname,privilege_type from (select distinct nspname, (aclexplode(acl)).grantor as grantorI, 
+      (aclexplode(acl)).grantee as granteeI,
+      (aclexplode(acl)).privilege_type,
+      (aclexplode(acl)).is_grantable from(select nspname,defaclacl as acl from  pg_default_acl a, pg_namespace b where
+                                         a.defaclnamespace=b.oid)  ) a,  pg_roles b where 
+      a.granteeI=b.oid and b.rolname ~ 'rw' ) b
+  where b.rolname=a.role_name ) a
+  where  privilege_type='EXECUTE'
+  ) c on role_name =c.member_name
+  where a.member_name 
+                     in ( SELECT pg_roles_1.rolname
+                           FROM pg_roles pg_roles_1
+                          WHERE pg_roles_1.rolcanlogin = true)) a,  
+						  
+						  (select nspname,current_database() as DB_NAME, 'p'||'_<hostname>_'||current_database()||'_'||nspname||'_'||'u'||privtype.priv|| grouptype.grppriv|| regiontype.regpriv||';' as Command from pg_namespace a ,
+( VALUES ('ro'::text,1), ('rw'::text,2), ('ex'::text,3) ) privtype(priv, privorder) ,
+ ( VALUES ('r'::text,1), ('g'::text,2)) grouptype(grppriv, grpprivorder) ,
+  ( VALUES ('i'::text,1), ('d'::text,2), ('s'::text,3), ('q'::text,4), ('p'::text,5)) regiontype(regpriv, regprivorder) 
+where not (a.nspname ~ '^pg_'::text OR a.nspname = 'information_schema'::name OR a.nspname = 'sys'::name OR a.nspname = 'dbo'::name OR a.nspname ~ '^dbms_'::text OR a.nspname ~ '^utl_'::text)
+and regiontype.regpriv='i' and privtype.priv='ex' and grouptype.grppriv='g') b 
+where a.nspname=b.nspname and a.DB_name=b.DB_name 
+
+UNION
+--WRITE Access
+select b.db_name,b.nspname,a.privilege_type,a.group_name,a.member_name,b.command as new_role from (select nspname,a.member_name,c.member_name as group_name, current_database() as DB_name,privilege_type from  ( SELECT pr1.rolname AS role_name,
+                    pr2.rolname AS member_name
+                   FROM pg_auth_members pam1
+                     JOIN pg_roles pr1 ON pam1.roleid = pr1.oid
+                     JOIN pg_roles pr2 ON pam1.member = pr2.oid) a 
+join  (
+select nspname,a.member_name,privilege_type  from  (select distinct  a.*, b.* from (select distinct * from  ( SELECT pr1.rolname AS role_name,
+                    pr2.rolname AS member_name
+                   FROM pg_auth_members pam1
+                     JOIN pg_roles pr1 ON pam1.roleid = pr1.oid
+                     JOIN pg_roles pr2 ON pam1.member = pr2.oid) a where a.member_name 
+                     in ( SELECT pg_roles_1.rolname
+                           FROM pg_roles pg_roles_1
+                          WHERE pg_roles_1.rolcanlogin = false) ) a,                    
+                           ( select distinct nspname,b.rolname,privilege_type from (select distinct nspname, (aclexplode(acl)).grantor as grantorI, 
+      (aclexplode(acl)).grantee as granteeI,
+      (aclexplode(acl)).privilege_type,
+      (aclexplode(acl)).is_grantable from(select nspname,defaclacl as acl from  pg_default_acl a, pg_namespace b where
+                                         a.defaclnamespace=b.oid)  ) a,  pg_roles b where 
+      a.granteeI=b.oid and b.rolname ~ 'rw' ) b
+  where b.rolname=a.role_name  ) a
+  where  privilege_type='INSERT'
+  ) c on role_name =c.member_name
+  where a.member_name 
+                     in ( SELECT pg_roles_1.rolname
+                           FROM pg_roles pg_roles_1
+                          WHERE pg_roles_1.rolcanlogin = true)) a,  
+						  
+						  (select nspname,current_database() as DB_NAME, 'p'||'_<hostname>_'||current_database()||'_'||nspname||'_'||'u'||privtype.priv|| grouptype.grppriv|| regiontype.regpriv||';' as Command from pg_namespace a ,
+( VALUES ('ro'::text,1), ('rw'::text,2), ('ex'::text,3) ) privtype(priv, privorder) ,
+ ( VALUES ('r'::text,1), ('g'::text,2)) grouptype(grppriv, grpprivorder) ,
+  ( VALUES ('i'::text,1), ('d'::text,2), ('s'::text,3), ('q'::text,4), ('p'::text,5)) regiontype(regpriv, regprivorder) 
+where not (a.nspname ~ '^pg_'::text OR a.nspname = 'information_schema'::name OR a.nspname = 'sys'::name OR a.nspname = 'dbo'::name OR a.nspname ~ '^dbms_'::text OR a.nspname ~ '^utl_'::text)
+and regiontype.regpriv='i' and privtype.priv='rw' and grouptype.grppriv='g') b 
+where a.nspname=b.nspname and a.DB_name=b.DB_name 
+
+union
+--SELECT Access
+select b.db_name,b.nspname,a.privilege_type,a.group_name,a.member_name,b.command as new_role from (select nspname,a.member_name,c.member_name as group_name, current_database() as DB_name,privilege_type from  ( SELECT pr1.rolname AS role_name,
+                    pr2.rolname AS member_name
+                   FROM pg_auth_members pam1
+                     JOIN pg_roles pr1 ON pam1.roleid = pr1.oid
+                     JOIN pg_roles pr2 ON pam1.member = pr2.oid) a 
+join  (
+select nspname,a.member_name,privilege_type  from  (select distinct  a.*, b.* from (select distinct * from  ( SELECT pr1.rolname AS role_name,
+                    pr2.rolname AS member_name
+                   FROM pg_auth_members pam1
+                     JOIN pg_roles pr1 ON pam1.roleid = pr1.oid
+                     JOIN pg_roles pr2 ON pam1.member = pr2.oid) a where a.member_name 
+                     in ( SELECT pg_roles_1.rolname
+                           FROM pg_roles pg_roles_1
+                          WHERE pg_roles_1.rolcanlogin = false) ) a,                    
+                           ( select distinct nspname,b.rolname,privilege_type from (select distinct nspname, (aclexplode(acl)).grantor as grantorI, 
+      (aclexplode(acl)).grantee as granteeI,
+      (aclexplode(acl)).privilege_type,
+      (aclexplode(acl)).is_grantable from(select nspname,defaclacl as acl from  pg_default_acl a, pg_namespace b where
+                                         a.defaclnamespace=b.oid)  ) a,  pg_roles b where 
+      a.granteeI=b.oid and   b.rolname !~ 'rw') b
+  where b.rolname=a.role_name ) a
+  where  privilege_type='SELECT'
+  ) c on role_name =c.member_name
+  where a.member_name 
+                     in ( SELECT pg_roles_1.rolname
+                           FROM pg_roles pg_roles_1
+                          WHERE pg_roles_1.rolcanlogin = true)) a,  
+						  
+						  (select nspname,current_database() as DB_NAME, 'p'||'_<hostname>_'||current_database()||'_'||nspname||'_'||'u'||privtype.priv|| grouptype.grppriv|| regiontype.regpriv||';' as Command from pg_namespace a ,
+( VALUES ('ro'::text,1), ('rw'::text,2), ('ex'::text,3) ) privtype(priv, privorder) ,
+ ( VALUES ('r'::text,1), ('g'::text,2)) grouptype(grppriv, grpprivorder) ,
+  ( VALUES ('i'::text,1), ('d'::text,2), ('s'::text,3), ('q'::text,4), ('p'::text,5)) regiontype(regpriv, regprivorder) 
+where not (a.nspname ~ '^pg_'::text OR a.nspname = 'information_schema'::name OR a.nspname = 'sys'::name OR a.nspname = 'dbo'::name OR a.nspname ~ '^dbms_'::text OR a.nspname ~ '^utl_'::text)
+and regiontype.regpriv='i' and privtype.priv='ro' and grouptype.grppriv='g') b 
+where a.nspname=b.nspname and a.DB_name=b.DB_name  order by 2,3,5
+
+
+
+------------------------- Change Request ITWR --------------------------
+
+
+Migrate all the non sox databases from LDB1552 PostgreSQL server to the new P01RDB001 server .
+
+Below given are the list of databases to be migrated.
+
+jira
+jde_archive
+bitbucketprod
+ora_fin_archive
+sonarqube
+confluence
+connectall
+insurance_operations
+
+
+REQ0029670
+
+
+----- AppDynamic User Registration -----------------------------
+STAGE
+===================
+
+CREATE USER dsas_apdynamics_apps WITH
+  LOGIN
+  SUPERUSER
+  INHERIT
+  NOCREATEDB
+  NOCREATEROLE
+  NOREPLICATION;
+
+QA
+==============
+
+CREATE USER dsas_apdynamics_appq WITH
+  LOGIN
+  SUPERUSER
+  INHERIT
+  NOCREATEDB
+  NOCREATEROLE
+  NOREPLICATION;
+
+DEV/INT
+===============
+
+CREATE USER dsas_apdynamics_appi WITH
+  LOGIN
+  SUPERUSER
+  INHERIT
+  NOCREATEDB
+  NOCREATEROLE
+  NOREPLICATION;
+
+PROD
+=====
+
+CREATE USER dsas_apdynamics_appp WITH
+  LOGIN
+  SUPERUSER
+  INHERIT
+  NOCREATEDB
+  NOCREATEROLE
+  NOREPLICATION;
+
+
+
+
+dsas_apdynamics_appq
+dsas_apdynamics_appi
+dsas_apdynamics_apps
+dsas_apdynamics_appp
+
+
+
+============================ Permission ==========================================
+
+
+select 
+'grant ' || substring(
+          case when charindex('U',split_part(split_part(array_to_string(nspacl, '|'),pu.usename,2 ) ,'/',1)) > 0 then ',usage ' else '' end 
+          ||case when charindex('C',split_part(split_part(array_to_string(nspacl, '|'),pu.usename,2 ) ,'/',1)) > 0 then ',create ' else '' end 
+       , 2,10000)
+|| ' on schema '||nspname||' to "'||pu.usename||'";' 
+from pg_namespace pn,pg_user pu
+ where  array_to_string(nspacl,',') like '%'||pu.usename||'%' --and pu.usename='<username>' 
+and nspowner > 1 
+union
+select 
+'grant ' || substring(
+          case when charindex('U',split_part(split_part(array_to_string(nspacl, '|'),pg.groname,2 ) ,'/',1)) > 0 then ',usage ' else '' end 
+          ||case when charindex('C',split_part(split_part(array_to_string(nspacl, '|'),pg.groname,2 ) ,'/',1)) > 0 then ',create ' else '' end 
+       , 2,10000)
+|| ' on schema '||nspname||' to group "'||pg.groname||'";' 
+from pg_namespace pn,pg_group pg
+ where array_to_string(nspacl,',') like '%'||pg.groname||'%' --and pg.groname='<username>' 
+ and nspowner > 1 
+ 
+ 
+ 
+ 
+ 
+schema wise default ACL list
+=============================================
+
+\pset pager off
+
+select 'alter default privileges for role '||grantee||' in schema '||nspname||' revoke all on '||obj_type||' from '||granted_role ||';'
+from (select d.nspname,b.rolname granted_role,c.rolname grantee,privilege_type,obj_type from (select defaclnamespace, CASE defaclobjtype WHEN 'r' THEN 'tables' WHEN 'S' THEN 'sequences' WHEN 'f' THEN 'functions' WHEN 'T' THEN 'types'
+WHEN 'v' THEN 'views' WHEN 'C' THEN 'columns' END obj_type,  (aclexplode(defaclacl)).grantor as grantorI, 
+      (aclexplode(defaclacl)).grantee as granteeI,
+      (aclexplode(defaclacl)).privilege_type,
+      (aclexplode(defaclacl)).is_grantable from pg_default_acl a ) a,  pg_roles b, pg_roles c, pg_namespace d where 
+      a.granteeI=b.oid
+	  and c.oid=a.grantorI 
+	  and a.defaclnamespace=d.oid and b.rolname like 'dsp_%' )
+	  
+	  
+	  
+select 'alter default privileges for role '||grantee||' in schema '||nspname||' revoke all on '||obj_type||' from '||granted_role ||';'
+from (select d.nspname,b.rolname granted_role,c.rolname grantee,privilege_type,obj_type from (select defaclnamespace, CASE defaclobjtype WHEN 'r' THEN 'tables' WHEN 'S' THEN 'sequences' WHEN 'f' THEN 'functions' WHEN 'T' THEN 'types'
+WHEN 'v' THEN 'views' WHEN 'C' THEN 'columns' END obj_type,  (aclexplode(defaclacl)).grantor as grantorI, 
+      (aclexplode(defaclacl)).grantee as granteeI,
+      (aclexplode(defaclacl)).privilege_type,
+      (aclexplode(defaclacl)).is_grantable from pg_default_acl a ) a,  pg_roles b, pg_roles c, pg_namespace d where 
+      a.granteeI=b.oid
+	  and c.oid=a.grantorI 
+	  and a.defaclnamespace=d.oid and b.rolname like 'dsp_%' )
+	  
+	  
+	  
+	  exists
+select a.nspname, b.rolname grantee,c.rolname grantor, privilege_type  from (select nspname, (aclexplode(nspacl)).grantor as grantorI, 
+      (aclexplode(nspacl)).grantee as granteeI,
+      (aclexplode(nspacl)).privilege_type,
+      (aclexplode(nspacl)).is_grantable from pg_namespace ) a,  pg_roles b, pg_roles c where 
+      a.granteeI=b.oid
+	  and c.oid=a.grantorI and	  b.rolname like 'p_ldb3218_adsint_alip_uror%'
+	  
+select b.rolname grantee,c.rolname grantor from pg_auth_members a , pg_roles b, pg_roles c where a.roleid=b.oid
+	  and c.oid=a.member and b.rolname='p_ldb3218_adsint_alip_urogi';
+	  
+	  --- Standby Check --------------
+	  
+WITH x AS (SELECT pg_current_wal_lsn() AS cx)
+SELECT
+    now()::timestamptz(0),
+    pg_wal_lsn_diff( cx, sent_lsn ) AS sent_lag,
+    pg_wal_lsn_diff( cx, write_lsn ) AS write_lag,
+    pg_wal_lsn_diff( cx, flush_lsn ) AS flush_lag,
+    pg_wal_lsn_diff( cx, replay_lsn ) AS replay_lag
+FROM
+    pg_stat_replication,
+    x;
+	
+	
+	
+--# PostgreSQL 10 installed on Ubuntu
+--# Primary DB cluster called "main" on port 5432
+--# Replica DB cluster called "replica" on port 5433
+
+-- PostgreSQL >= 10 then use "wal_lsn"
+-- PostgreSQL <  10 then use "xlog_location"
+
+-- on main
+select * from pg_stat_replication;
+select * from pg_replication_slots;
+
+-- on replica check if in standby_mode
+select pg_is_in_recovery();
+
+-- stop replica and check change in status
+sudo systemctl stop postgresql@10-replica
+
+-- on main
+select * from pg_stat_replication;
+select * from pg_replication_slots;
+
+-- start replica again
+sudo systemctl start postgresql@10-replica
+
+-- on main compare WAL status using lsn diff
+select pg_wal_lsn_diff('0/23000738','0/230001B0');
+
+-- on main query to track lag in bytes
+-- sending_lag could indicate heavy load on primary
+-- receiving_lag could indicate network issues or replica under heavy load
+-- replaying_lag could indicate replica under heavy load
+select
+  pid,
+  application_name,
+  pg_wal_lsn_diff(pg_current_wal_lsn(), sent_lsn) sending_lag,
+  pg_wal_lsn_diff(sent_lsn, flush_lsn) receiving_lag,
+  pg_wal_lsn_diff(flush_lsn, replay_lsn) replaying_lag,
+  pg_wal_lsn_diff(pg_current_wal_lsn(), replay_lsn) total_lag
+from pg_stat_replication;
+
+-- on replica can check replica locations or timing
+--   pg_last_wal_receive_lsn(), pg_last_wal_replay_lsn(), pg_last_xact_replay_timestamp()
+SELECT
+  CASE
+    WHEN pg_last_wal_receive_lsn() = pg_last_wal_replay_lsn()
+    THEN 0
+    ELSE EXTRACT (EPOCH FROM now() - pg_last_xact_replay_timestamp())
+    END AS log_delay;
+
+-- Want to know what file a lsn refers to?
+select pg_walfile_name(pg_current_wal_lsn());
+
+
+
+temp files usage
+====================================
+
+SELECT
+        pg_stat_activity.pid AS pid,
+        datname AS database,
+        pg_stat_activity.client_addr AS client,
+        EXTRACT(epoch FROM (NOW() - pg_stat_activity.query_start)) AS duration,
+        pg_stat_activity.usename AS user,
+        pg_stat_activity.state AS state,
+        pg_size_pretty(pg_temp_files.sum) as temp_file_size, pg_temp_files.count as temp_file_num
+    FROM
+        pg_stat_activity AS pg_stat_activity
+INNER JOIN
+(
+SELECT unnest(regexp_matches(agg.tmpfile, 'pgsql_tmp([0-9]*)')) AS pid,
+       SUM((pg_stat_file(agg.dir||'/'||agg.tmpfile)).size),
+       count(*)
+FROM
+  (SELECT ls.oid,
+          ls.spcname,
+          ls.dir||'/'||ls.sub AS dir,
+          CASE gs.i
+              WHEN 1 THEN ''
+              ELSE pg_ls_dir(dir||'/'||ls.sub)
+          END AS tmpfile
+   FROM
+     (SELECT sr.oid,
+             sr.spcname,
+             'pg_tblspc/'||sr.oid||'/'||sr.spc_root AS dir,
+             pg_ls_dir('pg_tblspc/'||sr.oid||'/'||sr.spc_root) AS sub
+      FROM
+        (SELECT spc.oid,
+                spc.spcname,
+                pg_ls_dir('pg_tblspc/'||spc.oid) AS spc_root,
+                trim(TRAILING E'\n '
+                     FROM pg_read_file('PG_VERSION')) AS v
+         FROM
+           (SELECT oid,
+                   spcname
+            FROM pg_tablespace
+            WHERE spcname !~ '^pg_') AS spc) sr
+      WHERE sr.spc_root ~ ('^PG_'||sr.v)
+        UNION ALL
+        SELECT 0,
+               'pg_default',
+               'base' AS dir,
+               'pgsql_tmp' AS sub
+        FROM pg_ls_dir('base') AS l WHERE l='pgsql_tmp' ) AS ls,
+
+     (SELECT generate_series(1,2) AS i) AS gs
+   WHERE ls.sub = 'pgsql_tmp') agg
+GROUP BY 1
+) as pg_temp_files on (pg_stat_activity.pid = pg_temp_files.pid::int)
+WHERE
+        pg_stat_activity.pid <> pg_backend_pid()
+ORDER BY
+        EXTRACT(epoch FROM (NOW() - pg_stat_activity.query_start)) DESC;
