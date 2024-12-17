@@ -497,7 +497,7 @@ select 'ALTER function '|| i.obj_owner ||'.'||i.obj_name||'('||pg_get_function_i
  select pn.nspname obj_owner, funname obj_name ,'function' obj_type, pf.oid function_objid  from pg_function pf,  pg_namespace pn where pf.funnamespace=pn.oid and pn.nspname='as400') i;
 
  
-************************* Suman Request ************
+*************************  Request ************
  
 listing the details
 ============================
@@ -541,7 +541,7 @@ and pr.rolname like 'dsas_datical_app%' and pn.nspname NOT IN ('pg_catalog', 'in
 where pr.oid=i.schema_owner_id) i;
 
 
-Make the below changes in LDB1551 and LDB1552 PostgreSQL production database servers
+Make the below changes in xxxxx and xxxxxx PostgreSQL production database servers
 
 1. As part of new audits, implement the changes for auditing all the SQL statements being executed in the Postgresql databases. 
 
@@ -1324,7 +1324,7 @@ where a.nspname=b.nspname and a.DB_name=b.DB_name  order by 2,3,5
 ------------------------- Change Request ITWR --------------------------
 
 
-Migrate all the non sox databases from LDB1552 PostgreSQL server to the new P01RDB001 server .
+Migrate all the non sox databases from xxxxxx PostgreSQL server to the new xxxxx server .
 
 Below given are the list of databases to be migrated.
 
@@ -1345,7 +1345,7 @@ REQ0029670
 STAGE
 ===================
 
-CREATE USER dsas_apdynamics_apps WITH
+CREATE USER xxxxxxxx WITH
   LOGIN
   SUPERUSER
   INHERIT
@@ -1356,7 +1356,7 @@ CREATE USER dsas_apdynamics_apps WITH
 QA
 ==============
 
-CREATE USER dsas_apdynamics_appq WITH
+CREATE USER xxxxxxxx WITH
   LOGIN
   SUPERUSER
   INHERIT
@@ -1367,7 +1367,7 @@ CREATE USER dsas_apdynamics_appq WITH
 DEV/INT
 ===============
 
-CREATE USER dsas_apdynamics_appi WITH
+CREATE USER xxxxxxxxx WITH
   LOGIN
   SUPERUSER
   INHERIT
@@ -1378,7 +1378,7 @@ CREATE USER dsas_apdynamics_appi WITH
 PROD
 =====
 
-CREATE USER dsas_apdynamics_appp WITH
+CREATE USER xxxxxxx WITH
   LOGIN
   SUPERUSER
   INHERIT
@@ -1389,10 +1389,10 @@ CREATE USER dsas_apdynamics_appp WITH
 
 
 
-dsas_apdynamics_appq
-dsas_apdynamics_appi
-dsas_apdynamics_apps
-dsas_apdynamics_appp
+xxxxxxxx
+xxxxxxxxx
+xxxxxxxx
+xxxxxxx
 
 
 
