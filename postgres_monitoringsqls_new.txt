@@ -1,4 +1,4 @@
-AWS Access: https://ifs.atheneusa.com/adfs/ls/IdpInitiatedSignOn.aspx?loginToRp=urn:amazon:webservices
+
 
 
 Size of The database
